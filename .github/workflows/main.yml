@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+  workflow_dispatch:
+
+env:
+  DOTNET_NOLOGO: "true"
+  DOTNET_SYSTEM_GLOBALIZATION_INVARIANT: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+  NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.NUGET_PACKAGES }}
+          key: nuget-${{ hashFiles('**/*.csproj') }}
+          restore-keys: nuget-
+      - run: dotnet restore
+      - run: dotnet build --configuration Release --no-restore
+      - run: dotnet publish FileManager/FileManager.csproj -c Release -o publish --no-build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: filemanager-bin
+          path: publish/
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.NUGET_PACKAGES }}
+          key: nuget-${{ hashFiles('**/*.csproj') }}
+          restore-keys: nuget-
+      - name: Unit tests (trx + Cobertura)
+        run: >
+          dotnet test --configuration Release
+          --logger "trx;LogFileName=test-results.trx"
+          --collect:"XPlat Code Coverage"
+          --results-directory TestResults
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-reports
+          path: TestResults/
+
+  sast:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-semgrep-v1
+      - name: Install Semgrep
+        run: |
+          python3 -m venv .venv 2>/dev/null || { apt-get update -qq && apt-get install -y -qq python3-venv && python3 -m venv .venv; }
+          . .venv/bin/activate
+          pip install semgrep
+      - name: Semgrep scan (fail on High/Critical)
+        run: |
+          . .venv/bin/activate
+          semgrep scan \
+            --config p/csharp --config p/owasp-top-ten --config semgrep-rules/ \
+            --severity ERROR --error --metrics=off \
+            --exclude .venv --exclude .nuget \
+            --sarif-output=semgrep.sarif .
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: semgrep-report
+          path: semgrep.sarif
+
+  deploy:
+    needs: sast
+    runs-on: ubuntu-latest
+    env:
+      APP_DB_PASSWORD: ${{ secrets.APP_DB_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ensure Docker CLI
+        run: command -v docker >/dev/null || { apt-get update -qq && apt-get install -y -qq docker.io; }
+      - name: Secret is injected (value is masked in log)
+        run: |
+          test -n "$APP_DB_PASSWORD"
+          echo "APP_DB_PASSWORD=$APP_DB_PASSWORD"
+      - name: Build Docker image (multi-stage)
+        run: docker build -t filemanager:ci .
+      - name: Image size
+        run: docker images filemanager:ci
+      - name: Verify non-root user
+        run: docker run --rm --entrypoint id filemanager:ci
+      - name: Local deploy and smoke test
+        run: |
+          printf '0\n' | docker run -i --rm -e APP_DB_PASSWORD="$APP_DB_PASSWORD" -v fm_data:/data filemanager:ci
+          echo "container exit code: $?"
+      - name: Save image as artifact
+        run: docker save filemanager:ci | gzip > filemanager-image.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: filemanager-image
+          path: filemanager-image.tar.gz

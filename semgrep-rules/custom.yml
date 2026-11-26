@@ -1,0 +1,8 @@
+rules:
+  - id: sqlite-sql-string-concatenation
+    languages: [csharp]
+    severity: ERROR
+    message: SQL-запрос собирается конкатенацией строк (риск SQL-инъекции). Используйте параметры ($name).
+    pattern-either:
+      - pattern: new SqliteCommand($A + $B, ...)
+      - pattern: $CMD.CommandText = $A + $B;

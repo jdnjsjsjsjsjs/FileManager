@@ -483,3 +483,10 @@ $RECYCLE.BIN/
 
 filemanager.db
 storage/
+bin/
+obj/
+TestResults/
+.nuget/
+.venv/
+.secrets
+*.db
